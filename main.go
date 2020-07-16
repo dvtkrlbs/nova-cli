@@ -1,16 +1,14 @@
 package main
 
 import (
-	"github.com/gtu-nova/msp"
+	"github.com/gtu-nova/nova-cli/msp"
 	"github.com/tarm/serial"
-	"runtime"
 	"strings"
-	"time"
 
 	"flag"
 	"github.com/gtu-nova/nova-cli/fc"
 	"os"
-	//"gopkg.in/Billups/golang-geo.v2"
+	"github.com/kellydunn/golang-geo"
 
 	"github.com/sirupsen/logrus"
 )
@@ -18,43 +16,6 @@ import (
 var (
 	portName = flag.String("p", "", "Serial port")
 )
-
-//for {
-//// Trying to connect on macOS when the port dev file is
-//// not present would cause an USB hub reset.
-//if f.portIsPresent() {
-//if err == nil {
-//f.logger.Info("Reconnected to Flight Controller\n")
-//f.msp = m
-//f.updateInfo()
-//return nil
-//}
-//}
-//time.Sleep(time.Millisecond)
-//}
-
-//// We want to avoid an EOF from the uart at all costs,
-//// so close the current port and open another one to ensure
-//// the goroutine reading from the port stops even if the
-//// board reboots very fast.
-//m := f.msp
-//f.msp = nil
-//_ = m.Close()
-//time.Sleep(time.Second)
-//mm, err := msp.New(f.opts.PortName, f.opts.BaudRate, f.logger)
-//if err != nil {
-//return err
-//}
-//_, _ = m.WriteCmd(msp.Reboot)
-//_ = mm.Close()
-
-//func (f *FC) portIsPresent() bool {
-//	if _, err := os.Stat(f.opts.PortName); os.IsNotExist(err) {
-//		return false
-//	}
-//
-//	return true
-//}
 
 var logger = logrus.New()
 
@@ -83,47 +44,6 @@ func (f *myFC) printInfo() {
 	}
 }
 
-type SCP struct {
-	name string
-	p    *serial.Port
-}
-
-func (scp *SCP) Reconnect() error {
-	for {
-		// Trying to connect on macOS when the scp dev file is
-		// not present would cause an USB hub reset.
-		if scp.portIsPresent() {
-			port, err := serial.OpenPort(&serial.Config{
-				Name: *portName,
-				Baud: 115200,
-			})
-			if err != nil {
-				return err
-			}
-			scp.p = port
-			return nil
-		}
-		time.Sleep(time.Millisecond)
-	}
-
-}
-
-func (scp *SCP) portIsPresent() bool {
-	if runtime.GOOS == "windows" {
-		return true
-	}
-	_, err := os.Stat(scp.name)
-	return err == nil
-}
-
-func (scp *SCP) Read(p []byte) (n int, err error) {
-	return scp.p.Read(p)
-}
-
-func (scp *SCP) Write(p []byte) (n int, err error) {
-	return scp.p.Write(p)
-}
-
 func (f *myFC) versionGte(major, minor, patch byte) bool {
 	return f.versionMajor > major || (f.versionMajor == major && f.versionMinor > minor) ||
 		(f.versionMajor == major && f.versionMinor == minor && f.versionPatch >= patch)
@@ -133,16 +53,6 @@ func (f *myFC) versionGte(major, minor, patch byte) bool {
 // the board has been retrieved via MSP.
 func (f *myFC) HasDetectedTargetName() bool {
 	return f.targetName != ""
-}
-
-func (f *myFC) reset() {
-	f.variant = ""
-	f.versionMajor = 0
-	f.versionMinor = 0
-	f.versionPatch = 0
-	f.boardID = ""
-	f.targetName = ""
-	f.Features = 0
 }
 
 var _fc myFC
@@ -164,52 +74,35 @@ func main() {
 		logger.Fatalf("Can't open port (%v)\n", err)
 	}
 
-	fcv, err := fc.NewFC(&SCP{p: port, name: *portName}, handleFrame, logger)
+	fcv, err := fc.NewFC(port, logger)
 	if err != nil {
 		logger.Fatal(err)
 	}
 
-	defer fcv.Close()
 
-	ticker := time.NewTicker(200 * time.Millisecond)
+	//ticker := time.NewTicker(200 * time.Millisecond)
 
-	_, _ = fcv.WriteCmd(msp.ApiVersion)
-	_, _ = fcv.WriteCmd(msp.FcVariant)
-	_, _ = fcv.WriteCmd(msp.FcVersion)
-	_, _ = fcv.WriteCmd(msp.BoardInfo)
-	_, _ = fcv.WriteCmd(msp.BuildInfo)
-
-	func() {
-		go func() {
-			for {
-				select {
-				case _ = <-ticker.C:
-					_, _ = fcv.WriteCmd(msp.RawGps)
-				}
-			}
-		}()
-	}()
-
-	//time.AfterFunc(3 * time.Second, func() {
-	//	_, _ = fcv.WriteCmd(msp.Reboot)
-	//})
-
-	time.Sleep(15 * time.Second)
-}
-
-func handleFrame(fr msp.Frame, f *fc.FC) error {
-	switch fr.Code {
-	case msp.ApiVersion:
+	fr, _ := fcv.WriteCmd(msp.ApiVersion)
+	if fr != nil {
 		logger.Infof("MSP API version %d.%d (protocol %d)\n", fr.Payload[1], fr.Payload[2], fr.Payload[0])
-	case msp.FcVariant:
+	}
+
+	fr, _ = fcv.WriteCmd(msp.FcVariant)
+	if fr != nil {
 		_fc.variant = string(fr.Payload)
 		_fc.printInfo()
-	case msp.FcVersion:
+	}
+
+	fr, _ = fcv.WriteCmd(msp.FcVersion)
+	if fr != nil {
 		_fc.versionMajor = fr.Payload[0]
 		_fc.versionMinor = fr.Payload[1]
 		_fc.versionPatch = fr.Payload[2]
 		_fc.printInfo()
-	case msp.BoardInfo:
+	}
+
+	fr, _ = fcv.WriteCmd(msp.BoardInfo)
+	if fr != nil {
 		// BoardID is always 4 characters
 		_fc.boardID = string(fr.Payload[:4])
 		// Then 4 bytes follow, HW revision (uint16), builtin OSD type (uint8) and wether
@@ -223,30 +116,83 @@ func handleFrame(fr msp.Frame, f *fc.FC) error {
 			}
 		}
 		_fc.printInfo()
-	case msp.BuildInfo:
+	}
+
+
+	fr, _ = fcv.WriteCmd(msp.BuildInfo)
+	if fr != nil {
 		buildDate := string(fr.Payload[:11])
 		buildTime := string(fr.Payload[11:19])
 		// XXX: Revision is 8 characters in iNav but 7 in BF/CF
 		rev := string(fr.Payload[19:])
 		logger.Infof("Build %s (built on %s @ %s)\n", rev, buildDate, buildTime)
-	case msp.Reboot:
-		logger.Warn("Rebooting board...\n")
+	}
 
-	case msp.RawGps:
+
+
+	fr, _ = fcv.WriteCmd(msp.RawGps)
+	if fr != nil {
 		var r msp.RawGpsData
 		_ = fr.Read(&r)
 
+		lat := float64(r.Latitude) / 10_000_000
+		long := float64(r.Longitude) / 10_000_000
+
 		logger.Infof("Fix: %d, Sat: %d, Lat: %f, Long: %f, Alt: %d\n", r.FixType, r.NumSat,
-			float64(r.Latitude)/10_000_000, float64(r.Longitude)/10_000_000, r.Altitude)
-	case msp.Wp:
-		var r msp.SetGetWpData
-		_ = fr.Read(&r)
-		logger.Infof("No: %d, Lat: %f, Lon: %f, Alt: %d\n", r.WpNo, float64(r.Latitude)/10_000_000, float64(r.Longitude)/10_000_000, r.Altitude)
+			lat, long, r.Altitude)
+
+		point := geo.NewPoint(lat, long)
+		var newPoint *geo.Point
+		flag := uint8(0)
+
+		for i := 0; i < 6; i++ {
+			if i == 5 {
+				flag = 0xa5
+			}
+			newPoint = point.PointAtDistanceAndBearing(0.005, float64(60*i))
+			fr, _ = fcv.WriteCmd(msp.SetWp, msp.SetGetWpData{
+				WpNo:     uint8(i + 1),
+				Action:    	1,
+				Latitude:  uint32(newPoint.Lat() * 10_000_000),
+				Longitude: uint32(newPoint.Lng() * 10_000_000),
+				Altitude:  1000,
+				P1: 3000,
+				Flag:      flag,
+			})
+		}
+
+		fr, _ = fcv.WriteCmd(msp.WpMissionSave, uint8(0))
+
+		fr, err = fcv.WriteCmd(msp.Wp, uint8(1))
+		if fr != nil {
+			var rx msp.SetGetWpData
+			_ = fr.Read(&rx)
+			logger.Infof("No: %d, Lat: %f, Lon: %f, Alt: %d\n", rx.WpNo, float64(rx.Latitude)/10_000_000, float64(rx.Longitude)/10_000_000, rx.Altitude)
+		}
+	}
+
+
+
+
+	//func() {
+	//	go func() {
+	//		for {
+	//			select {
+	//			case _ = <-ticker.C:
+	//				_, _ = fcv.WriteCmd(msp.RawGps)
+	//			}
+	//		}
+	//	}()
+	//}()
+
+}
+
+func handleFrame(fr msp.Frame, fc *fc.FC) error {
+	switch fr.Code {
+
 	case msp.DebugMsg:
 		s := strings.Trim(string(fr.Payload), " \r\n\t\x00")
 		logger.Debugf("[DEBUG] %s\n", s)
-	case msp.SetWp:
-	// Nothing to do for these
 	default:
 		logger.Warnf("Unhandled MSP frame %d with payload %v\n", fr.Code, fr.Payload)
 	}
