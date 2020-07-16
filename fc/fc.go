@@ -14,23 +14,16 @@ type MspCallback func(fr msp.Frame, fc *FC) error
 // handle disconnections and reconnections on its on. Use NewFC()
 // to initialize an FC and then call FC.mainLoop().
 type FC struct {
-	msp            *msp.MSP
-	callbackMap    map[uint16]MspCallback
-	onFrame        MspCallback
-	logger         *logrus.Logger
-	closeChan      chan bool
-	isReconnecting bool
-	isRebooting    bool
-}
-
-type ReadWriteReconnect interface {
-	io.ReadWriter
-	Reconnect() error
+	msp         *msp.MSP
+	callbackMap map[uint16]MspCallback
+	onFrame     MspCallback
+	logger      *logrus.Logger
+	closeChan   chan bool
 }
 
 // NewFC returns a new FC using the given port and baud rate. stdout is
 // optional and will default to os.Stdout if nil
-func NewFC(port ReadWriteReconnect, frCallback MspCallback, logger *logrus.Logger) (*FC, error) {
+func NewFC(port io.ReadWriter, frCallback MspCallback, logger *logrus.Logger) (*FC, error) {
 	m, err := msp.New(port, logger)
 	if err != nil {
 		return nil, err
@@ -60,22 +53,8 @@ func (f *FC) AddCallbacks(msgIds []uint16, fns []MspCallback) {
 	}
 }
 
-func (f *FC) Reconnect() {
-	f.isReconnecting = true
-	p := f.msp.Port.(ReadWriteReconnect)
-	if err := p.Reconnect(); err != nil {
-		f.logger.Fatal("Failed to reconnect (%v)", err)
-	}
-	f.logger.Info("Reconnected to the flight controller")
-	f.isReconnecting = false
-}
-
 func (f *FC) WriteCmd(cmd uint16, args ...interface{}) (int, error) {
-	if !f.isReconnecting && !f.isRebooting {
-		return f.msp.WriteCmd(cmd, args...)
-	} else {
-		return 0, nil
-	}
+	return f.msp.WriteCmd(cmd, args...)
 }
 
 func (f *FC) Close() {
@@ -94,29 +73,25 @@ func (f *FC) mainLoop() {
 				var frame *msp.Frame
 				var err error
 
-				if !f.isReconnecting {
-					frame, err = f.msp.ReadFrame()
+				frame, err = f.msp.ReadFrame()
 
-					if err != nil {
-						var perr *msp.InvalidPacketError
-						if errors.As(err, &perr) {
-							f.logger.Warnf("Invalid packet (%v)\n", err)
-							continue
-						} else {
-							f.logger.Warnf("Attempting to reconnect")
-							f.Reconnect()
-						}
+				if err != nil {
+					var perr *msp.InvalidPacketError
+					if errors.As(err, &perr) {
+						f.logger.Warnf("Invalid packet (%v)\n", err)
+						continue
+					} else {
+						f.logger.Fatalf("Connection Lost")
 					}
-					if frame != nil {
-						if callback, found := f.callbackMap[frame.Code]; found {
-							err = callback(*frame, f)
-						} else {
-							err = f.onFrame(*frame, f)
-						}
-						if err != nil {
-							f.logger.Errorf("Error in callback for message code %d (%v)\n", frame.Code, err)
-						}
-
+				}
+				if frame != nil {
+					if callback, found := f.callbackMap[frame.Code]; found {
+						err = callback(*frame, f)
+					} else {
+						err = f.onFrame(*frame, f)
+					}
+					if err != nil {
+						f.logger.Errorf("Error in callback for message code %d (%v)\n", frame.Code, err)
 					}
 				}
 			case <-f.closeChan:
