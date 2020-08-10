@@ -31,3 +31,12 @@ type RawGpsData struct {
 	GroundCourse uint16
 	Hdop         uint16
 }
+
+type NavStatusData struct {
+	Mode uint8
+	State uint8
+	ActiveWpAction uint8
+	ActiveWpNumber uint8
+	Error uint8
+	HeadingHoldToTarget uint16
+}
